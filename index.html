@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>&#8203;</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#68707a; --line:#e3e6ea; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1c2026; --ink:#e8eaed; --mute:#9aa1aa; --line:#2b3038; --bad:#ff8a80; } }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink);
+         font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  form { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; width:min(340px, 90vw); }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p { margin:0 0 16px; color:var(--mute); font-size:13px; }
+  input[type=password] { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--line); border-radius:9px;
+         font:inherit; background:var(--bg); color:var(--ink); }
+  label { display:flex; gap:8px; align-items:center; margin:12px 0 16px; font-size:13px; color:var(--mute); }
+  button { width:100%; padding:10px; border:0; border-radius:9px; background:var(--ink); color:var(--bg); font:inherit; font-weight:700; cursor:pointer; }
+  .err { color:var(--bad); font-size:13px; min-height:18px; margin-top:10px; }
+</style>
+</head>
+<body>
+<form id="f" hidden>
+  <p>Enter the password to open this page.</p>
+  <input id="pw" type="password" autocomplete="current-password" placeholder="Password" autofocus>
+  <label><input id="rem" type="checkbox"> Remember on this device</label>
+  <button>Unlock</button>
+  <div class="err" id="err"></div>
+</form>
+<script>
+const REFRESH = 90;
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const tob64 = a => btoa(String.fromCharCode(...new Uint8Array(a)));
+const store = { get(k){ try { return sessionStorage.getItem(k) || localStorage.getItem(k); } catch(e){ return null; } },
+  set(k,v,rem){ try { sessionStorage.setItem(k,v); if (rem) localStorage.setItem(k,v); } catch(e){} },
+  del(k){ try { sessionStorage.removeItem(k); localStorage.removeItem(k); } catch(e){} } };
+
+async function load() {
+  const r = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error("Couldn't load the page data (" + r.status + ")");
+  return r.json();
+}
+async function derive(pw, d) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+  return crypto.subtle.deriveBits({ name: "PBKDF2", salt: b64(d.salt), iterations: d.iter, hash: "SHA-256" }, base, 512);
+}
+async function unlock(bits, d) {
+  const raw = new Uint8Array(bits);
+  const macKey = await crypto.subtle.importKey("raw", raw.slice(32), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const iv = b64(d.iv), ct = b64(d.ct), both = new Uint8Array(iv.length + ct.length);
+  both.set(iv); both.set(ct, iv.length);
+  if (!await crypto.subtle.verify("HMAC", macKey, b64(d.mac), both)) return null;   // wrong password
+  const aesKey = await crypto.subtle.importKey("raw", raw.slice(0, 32), { name: "AES-CBC" }, false, ["decrypt"]);
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, aesKey, ct));
+}
+function show(html) {
+  document.open(); document.write(html); document.close();
+}
+
+(async () => {
+  const f = document.getElementById("f"), err = document.getElementById("err");
+  let d;
+  try { d = await load(); } catch (e) { f.hidden = false; err.textContent = e.message; return; }
+  const keyName = "sw-key-" + d.salt;
+  const saved = store.get(keyName);
+  if (saved) {
+    const html = await unlock(b64(saved), d);
+    if (html) return show(html);
+    store.del(keyName);                       // password was changed
+  }
+  f.hidden = false;
+  f.onsubmit = async e => {
+    e.preventDefault(); err.textContent = "Unlocking...";
+    const bits = await derive(document.getElementById("pw").value, d);
+    const html = await unlock(bits, d);
+    if (!html) { err.textContent = "Wrong password."; return; }
+    store.set(keyName, tob64(bits), document.getElementById("rem").checked);
+    show(html);
+  };
+})();
+</script>
+</body>
+</html>
